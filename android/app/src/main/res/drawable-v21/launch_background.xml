@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自定义启动闪屏页 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 背景颜色 - 深蓝色 #0A1128 -->
+    <item>
+        <color android:color="#0A1128" />
+    </item>
+
+    <!-- 中间显示图片 -->
+    <item
+        android:width="200dp"
+        android:height="200dp"
+        android:gravity="center">
+        <bitmap
+            android:gravity="fill"
+            android:src="@drawable/sun" />
+    </item>
+</layer-list>
