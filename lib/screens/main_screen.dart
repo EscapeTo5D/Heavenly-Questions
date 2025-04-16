@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../widgets/bottom_nav_bar.dart';
 import '../constants/theme.dart';
 import 'zodiac_sphere_screen.dart';
-import 'nasa_screen.dart';
+import 'fixed_nasa_screen.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
