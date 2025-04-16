@@ -1,5 +1,7 @@
+import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'dart:async';
 import '../constants/theme.dart';
 import '../models/nasa_apod.dart';
 import '../services/nasa_service.dart';
@@ -14,6 +16,8 @@ class NasaScreen extends StatefulWidget {
 class _NasaScreenState extends State<NasaScreen> {
   final NasaService _nasaService = NasaService();
   final ScrollController _scrollController = ScrollController();
+  final Map<String, NasaApod> _cachedApods = HashMap<String, NasaApod>();
+
   List<NasaApod> _apodList = [];
   bool _isLoading = true;
   bool _isLoadingMore = false;
@@ -74,7 +78,12 @@ class _NasaScreenState extends State<NasaScreen> {
     }
   }
 
-  // 加载更多NASA每日一图
+  // 获取格式化日期字符串
+  String _getFormattedDate(DateTime date) {
+    return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+  }
+
+  // 优化：并行加载更多NASA每日一图
   Future<void> _loadMoreApod() async {
     if (_isLoadingMore || !_hasMore || !mounted) return; // 检查是否已卸载
 
@@ -83,35 +92,60 @@ class _NasaScreenState extends State<NasaScreen> {
     });
 
     try {
-      final List<NasaApod> newApodList = [];
+      final List<Future<NasaApod?>> futures = [];
+      final List<DateTime> dates = [];
       DateTime date = _currentDate;
-      int loadedCount = 0;
 
-      // 每次加载10张图片
-      while (loadedCount < 10 && _hasMore && _isMounted) {
-        try {
-          final apod = await _nasaService.getAstronomyPictureByDate(date);
-          if (!_isMounted) return; // 检查异步操作过程中是否已卸载
+      // 准备10个并行请求
+      for (int i = 0; i < 10; i++) {
+        final String formattedDate = _getFormattedDate(date);
 
-          newApodList.add(apod);
-          loadedCount++;
-          date = date.subtract(const Duration(days: 1));
-        } catch (e) {
-          // 如果日期早于NASA APOD开始日期，认为没有更多数据
-          if (date.isBefore(DateTime(1995, 6, 16))) {
-            _hasMore = false;
-            break;
-          }
-          date = date.subtract(const Duration(days: 1));
-          continue;
+        // 检查缓存中是否已有此日期的数据
+        if (_cachedApods.containsKey(formattedDate)) {
+          dates.add(date);
+          futures.add(Future.value(_cachedApods[formattedDate]));
+        } else {
+          // 为每一天创建一个Future，设置超时
+          dates.add(date);
+          futures.add(_fetchApodWithTimeout(date));
         }
+
+        date = date.subtract(const Duration(days: 1));
+
+        // 如果已经到达NASA APOD开始日期，则结束
+        if (date.isBefore(DateTime(1995, 6, 16))) {
+          _hasMore = false;
+          break;
+        }
+      }
+
+      // 并行执行所有请求
+      final results = await Future.wait(futures);
+
+      if (!_isMounted) return; // 再次检查是否已卸载
+
+      // 处理结果
+      final List<NasaApod> newApodList = [];
+
+      for (int i = 0; i < results.length; i++) {
+        if (results[i] != null) {
+          newApodList.add(results[i]!);
+
+          // 添加到缓存
+          final String formattedDate = _getFormattedDate(dates[i]);
+          _cachedApods[formattedDate] = results[i]!;
+        }
+      }
+
+      // 更新日期指针到最后一个处理过的日期
+      if (dates.isNotEmpty) {
+        _currentDate = dates.last.subtract(const Duration(days: 1));
       }
 
       if (mounted) {
         // 检查是否已卸载
         setState(() {
           _apodList.addAll(newApodList);
-          _currentDate = date;
           _isLoading = false;
           _isLoadingMore = false;
         });
@@ -128,14 +162,27 @@ class _NasaScreenState extends State<NasaScreen> {
     }
   }
 
+  // 使用超时机制获取APOD数据
+  Future<NasaApod?> _fetchApodWithTimeout(DateTime date) async {
+    try {
+      // 设置5秒超时
+      return await _nasaService
+          .getAstronomyPictureByDate(date)
+          .timeout(const Duration(seconds: 5));
+    } catch (e) {
+      // 超时或错误时返回null
+      return null;
+    }
+  }
+
   // 重置当前日期并刷新数据
-  void _refreshData() {
+  Future<void> _refreshData() async {
     if (!mounted) return; // 检查是否已卸载
 
     setState(() {
       _hasMore = true;
     });
-    _loadApodList();
+    await _loadApodList();
   }
 
   @override
@@ -162,7 +209,17 @@ class _NasaScreenState extends State<NasaScreen> {
   Widget _buildBody() {
     if (_isLoading && _apodList.isEmpty) {
       return const Center(
-          child: CircularProgressIndicator(color: AppTheme.purple));
+          child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(color: AppTheme.purple),
+          SizedBox(height: 16),
+          Text(
+            '正在加载NASA图片...',
+            style: TextStyle(color: AppTheme.white),
+          ),
+        ],
+      ));
     }
 
     if (_errorMessage != null && _apodList.isEmpty) {
@@ -200,17 +257,37 @@ class _NasaScreenState extends State<NasaScreen> {
           child: Text('无数据', style: TextStyle(color: AppTheme.white)));
     }
 
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.all(16),
-      itemCount: _apodList.length + (_hasMore ? 1 : 0),
-      itemBuilder: (context, index) {
-        if (index == _apodList.length) {
-          return _buildLoadMoreIndicator();
-        }
-        final apod = _apodList[index];
-        return _buildApodCard(apod, context);
-      },
+    return RefreshIndicator(
+      onRefresh: _refreshData,
+      color: AppTheme.purple,
+      backgroundColor: AppTheme.midBlue,
+      child: CustomScrollView(
+        controller: _scrollController,
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.all(12),
+            sliver: SliverGrid(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2, // 两列布局
+                childAspectRatio: 0.65, // 进一步调整宽高比，适应容器高度增加
+                crossAxisSpacing: 12, // 水平间距
+                mainAxisSpacing: 12, // 垂直间距
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final apod = _apodList[index];
+                  return _buildApodCard(apod, context);
+                },
+                childCount: _apodList.length,
+              ),
+            ),
+          ),
+          if (_hasMore)
+            SliverToBoxAdapter(
+              child: _buildLoadMoreIndicator(),
+            ),
+        ],
+      ),
     );
   }
 
@@ -219,7 +296,16 @@ class _NasaScreenState extends State<NasaScreen> {
       padding: const EdgeInsets.symmetric(vertical: 20),
       child: Center(
         child: _isLoadingMore
-            ? const CircularProgressIndicator(color: AppTheme.purple)
+            ? const Column(
+                children: [
+                  CircularProgressIndicator(color: AppTheme.purple),
+                  SizedBox(height: 8),
+                  Text(
+                    '加载中...',
+                    style: TextStyle(color: AppTheme.lightBlue),
+                  ),
+                ],
+              )
             : const Text(
                 '上拉加载更多',
                 style: TextStyle(color: AppTheme.lightBlue),
@@ -229,110 +315,173 @@ class _NasaScreenState extends State<NasaScreen> {
   }
 
   Widget _buildApodCard(NasaApod apod, BuildContext context) {
+    // 方法1：计算屏幕宽度来设置合适的图片高度
+    final screenWidth = MediaQuery.of(context).size.width;
+    final cardWidth = (screenWidth - 36) / 2; // 计算单个卡片的宽度（减去内外边距）
+    final imageHeight = cardWidth * 1; // 设置图片高度为卡片宽度的0.9倍
+
     return Card(
-      margin: const EdgeInsets.only(bottom: 20),
+      margin: EdgeInsets.zero,
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       color: AppTheme.midBlue,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 图片部分
-          ClipRRect(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-            child: GestureDetector(
-              onTap: () => _showApodDetails(apod, context),
-              child: Stack(
-                children: [
-                  apod.mediaType == 'image'
-                      ? Image.network(
-                          apod.url,
-                          height: 200,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
-                          loadingBuilder: (context, child, loadingProgress) {
-                            if (loadingProgress == null) return child;
-                            return Container(
-                              height: 200,
-                              width: double.infinity,
-                              color: AppTheme.midBlue,
-                              child: const Center(
-                                child: CircularProgressIndicator(
-                                    color: AppTheme.purple),
+          // 图片部分 - 方法2：使用容器限制图片大小
+          Container(
+            height: imageHeight,
+            width: double.infinity,
+            decoration: const BoxDecoration(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+              color: AppTheme.darkBlue,
+            ),
+            child: ClipRRect(
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(12)),
+              child: GestureDetector(
+                onTap: () => _showApodDetails(apod, context),
+                child: Stack(
+                  children: [
+                    // 方法3：使用BoxFit控制图片填充方式
+                    apod.mediaType == 'image'
+                        ? Image.network(
+                            apod.url,
+                            height: imageHeight,
+                            width: double.infinity,
+                            fit: BoxFit.cover, // 控制图片填充方式
+                            // 优化：缓存图片
+                            cacheHeight: 400,
+                            cacheWidth: 600,
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return Container(
+                                height: imageHeight,
+                                width: double.infinity,
+                                color: AppTheme.midBlue,
+                                child: Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      CircularProgressIndicator(
+                                        color: AppTheme.purple,
+                                        value: loadingProgress
+                                                    .expectedTotalBytes !=
+                                                null
+                                            ? loadingProgress
+                                                    .cumulativeBytesLoaded /
+                                                (loadingProgress
+                                                        .expectedTotalBytes ??
+                                                    1)
+                                            : null,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      const Text(
+                                        '加载中...',
+                                        style: TextStyle(
+                                            color: AppTheme.white,
+                                            fontSize: 10),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                            errorBuilder: (context, error, stackTrace) {
+                              return Container(
+                                height: imageHeight,
+                                width: double.infinity,
+                                color: AppTheme.midBlue,
+                                child: const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.image_not_supported,
+                                          color: AppTheme.white, size: 32),
+                                      SizedBox(height: 4),
+                                      Text(
+                                        '加载失败',
+                                        style: TextStyle(
+                                            color: AppTheme.white,
+                                            fontSize: 10),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          )
+                        : Container(
+                            height: imageHeight,
+                            width: double.infinity,
+                            color: AppTheme.midBlue,
+                            child: const Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.movie,
+                                      color: AppTheme.white, size: 32),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    '视频内容',
+                                    style: TextStyle(
+                                        color: AppTheme.white, fontSize: 10),
+                                  ),
+                                ],
                               ),
-                            );
-                          },
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              height: 200,
-                              width: double.infinity,
-                              color: AppTheme.midBlue,
-                              child: const Center(
-                                child: Icon(Icons.image_not_supported,
-                                    color: AppTheme.white, size: 50),
-                              ),
-                            );
-                          },
-                        )
-                      : Container(
-                          height: 200,
-                          width: double.infinity,
-                          color: AppTheme.midBlue,
-                          child: const Center(
-                            child: Icon(Icons.movie,
-                                color: AppTheme.white, size: 50),
+                            ),
                           ),
+                    // 右下角的媒体类型图标
+                    Positioned(
+                      bottom: 4,
+                      right: 4,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: AppTheme.darkBlue.withOpacity(0.7),
+                          borderRadius: BorderRadius.circular(4),
                         ),
-                  // 标题层
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.bottomCenter,
-                          end: Alignment.topCenter,
-                          colors: [
-                            AppTheme.darkBlue.withOpacity(0.9),
-                            AppTheme.darkBlue.withOpacity(0.0),
-                          ],
+                        child: Icon(
+                          apod.mediaType == 'image'
+                              ? Icons.image
+                              : Icons.video_library,
+                          color: AppTheme.lightBlue,
+                          size: 14,
                         ),
-                      ),
-                      child: Text(
-                        apod.title,
-                        style: const TextStyle(
-                          color: AppTheme.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
+            ),
+          ),
+          // 标题部分 - 固定高度确保布局一致
+          Container(
+            height: 42, // 固定高度容纳两行文本
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+            child: Text(
+              apod.title,
+              style: const TextStyle(
+                color: AppTheme.white,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
           // 日期部分
           Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              mainAxisAlignment: MainAxisAlignment.start,
               children: [
                 Text(
                   DateFormat('yyyy年MM月dd日').format(DateTime.parse(apod.date)),
                   style: const TextStyle(
                     color: AppTheme.lightBlue,
-                    fontSize: 14,
+                    fontSize: 10,
                   ),
-                ),
-                Icon(
-                  apod.mediaType == 'image' ? Icons.image : Icons.video_library,
-                  color: AppTheme.lightBlue,
-                  size: 16,
                 ),
               ],
             ),
