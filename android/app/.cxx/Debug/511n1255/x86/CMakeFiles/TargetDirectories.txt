@@ -1,0 +1,2 @@
+C:/Users/smith/StudioProjects/Heavenly-Questions/android/app/.cxx/Debug/511n1255/x86/CMakeFiles/edit_cache.dir
+C:/Users/smith/StudioProjects/Heavenly-Questions/android/app/.cxx/Debug/511n1255/x86/CMakeFiles/rebuild_cache.dir

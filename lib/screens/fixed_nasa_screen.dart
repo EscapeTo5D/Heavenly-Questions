@@ -1,10 +1,21 @@
 import 'dart:collection';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'dart:async';
 import '../constants/theme.dart';
 import '../models/nasa_apod.dart';
 import '../services/nasa_service.dart';
+import '../services/local_storage_service.dart';
+
+// 全局缓存，确保即使widget被销毁也能保持图片数据
+final Map<String, NasaApod> _globalCachedApods = HashMap<String, NasaApod>();
+// 全局标志，标记是否已经初始化过
+bool _globalInitialized = false;
+// 全局保存的图片列表
+List<NasaApod> _globalApodList = [];
+// 全局记录的当前日期
+DateTime _globalCurrentDate = DateTime.now();
+// 全局保存滚动位置
+double _globalScrollPosition = 0.0;
 
 class NasaScreen extends StatefulWidget {
   const NasaScreen({super.key});
@@ -13,37 +24,164 @@ class NasaScreen extends StatefulWidget {
   State<NasaScreen> createState() => _NasaScreenState();
 }
 
-class _NasaScreenState extends State<NasaScreen> {
+class _NasaScreenState extends State<NasaScreen>
+    with AutomaticKeepAliveClientMixin {
   final NasaService _nasaService = NasaService();
-  final ScrollController _scrollController = ScrollController();
-  final Map<String, NasaApod> _cachedApods = HashMap<String, NasaApod>();
+  final LocalStorageService _storageService = LocalStorageService();
+  late ScrollController _scrollController;
+
+  // 使用getter获取缓存，确保同步
+  Map<String, NasaApod> get _cachedApods => _globalCachedApods;
 
   List<NasaApod> _apodList = [];
-  bool _isLoading = true;
+  bool _isLoading = false;
   bool _isLoadingMore = false;
   String? _errorMessage;
   DateTime _currentDate = DateTime.now();
   bool _hasMore = true;
   bool _isMounted = true;
 
+  // 标志位，用于跟踪初始加载是否已完成
+  bool _initialLoadComplete = false;
+
+  // 标记是否已恢复过滚动位置
+  bool _hasRestoredScrollPosition = false;
+
+  // 最大重试次数
+  static const int _maxRetries = 3;
+
+  // API限流控制
+  static const Duration _initialBackoff = Duration(seconds: 1);
+  static const int _maxBackoffSeconds = 30;
+
+  // 用于跟踪失败的日期，以便重试
+  final Map<String, int> _failedDates = HashMap<String, int>();
+
+  // 上次请求时间
+  DateTime _lastRequestTime =
+      DateTime.now().subtract(const Duration(seconds: 5));
+
   @override
   void initState() {
     super.initState();
-    _loadApodList();
+
+    // 初始化时先尝试从本地存储加载数据
+    _initFromLocalStorage();
+  }
+
+  Future<void> _initFromLocalStorage() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    // 从本地存储加载初始化标志
+    final isInitialized = await _storageService.getInitialized();
+
+    if (isInitialized) {
+      try {
+        // 加载保存的滚动位置
+        final savedScrollPosition =
+            await _storageService.getSavedScrollPosition();
+        _globalScrollPosition = savedScrollPosition;
+
+        // 加载保存的当前日期
+        final savedCurrentDate = await _storageService.getSavedCurrentDate();
+        if (savedCurrentDate != null) {
+          _currentDate = savedCurrentDate;
+          _globalCurrentDate = savedCurrentDate;
+        }
+
+        // 加载保存的APOD列表
+        final savedApods = await _storageService.getAllApods();
+        if (savedApods.isNotEmpty) {
+          // 更新全局和内存缓存
+          _apodList = savedApods;
+          _globalApodList = List.from(savedApods);
+
+          // 更新缓存Map
+          for (final apod in savedApods) {
+            _globalCachedApods[apod.date] = apod;
+          }
+
+          _initialLoadComplete = true;
+          _globalInitialized = true;
+
+          // 初始化ScrollController并恢复位置
+          _scrollController = ScrollController(
+            initialScrollOffset: _globalScrollPosition,
+          );
+
+          _scrollController.addListener(_onScroll);
+
+          setState(() {
+            _isLoading = false;
+          });
+
+          // 确保在UI构建后恢复滚动位置
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!_hasRestoredScrollPosition && _scrollController.hasClients) {
+              _scrollController.jumpTo(_globalScrollPosition);
+              _hasRestoredScrollPosition = true;
+            }
+          });
+
+          return;
+        }
+      } catch (e) {
+        print('从本地存储加载数据时出错: $e');
+      }
+    }
+
+    // 如果没有保存的数据或加载失败，则执行常规初始化
+    _scrollController = ScrollController(
+      initialScrollOffset: _globalScrollPosition,
+    );
+
     _scrollController.addListener(_onScroll);
+
+    await _loadApodList();
   }
 
   @override
   void dispose() {
+    // 将数据保存到全局缓存
+    _globalApodList = List.from(_apodList);
+    _globalCurrentDate = _currentDate;
+    _globalInitialized = true;
+
+    // 保存当前滚动位置
+    if (_scrollController.hasClients) {
+      _globalScrollPosition = _scrollController.offset;
+      _storageService.saveScrollPosition(_globalScrollPosition);
+    }
+
+    // 保存当前日期
+    _storageService.saveCurrentDate(_currentDate);
+
+    // 设置初始化标志
+    _storageService.setInitialized(true);
+
     _isMounted = false;
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _nasaService.dispose(); // 释放HTTP客户端资源
     super.dispose();
   }
+
+  // 实现AutomaticKeepAliveClientMixin所需的方法
+  @override
+  bool get wantKeepAlive => true;
 
   // 监听滚动事件
   void _onScroll() {
     if (!mounted) return;
+
+    // 保存当前滚动位置
+    if (_scrollController.hasClients) {
+      _globalScrollPosition = _scrollController.offset;
+      // 节流保存：只在停止滚动时保存位置
+      _debounceScrollPositionSave();
+    }
 
     if (_scrollController.position.pixels >=
             _scrollController.position.maxScrollExtent - 200 &&
@@ -53,19 +191,51 @@ class _NasaScreenState extends State<NasaScreen> {
     }
   }
 
+  // 滚动位置保存节流器
+  Timer? _scrollSaveTimer;
+  void _debounceScrollPositionSave() {
+    if (_scrollSaveTimer?.isActive ?? false) {
+      _scrollSaveTimer?.cancel();
+    }
+    _scrollSaveTimer = Timer(const Duration(seconds: 1), () {
+      _storageService.saveScrollPosition(_globalScrollPosition);
+    });
+  }
+
   // 加载多天的NASA每日一图
   Future<void> _loadApodList() async {
     if (!mounted) return;
 
     setState(() {
-      _isLoading = true;
+      // 只有在第一次加载或强制刷新时才显示加载状态
+      if (!_initialLoadComplete) {
+        _isLoading = true;
+        _apodList = [];
+        _currentDate = DateTime.now();
+        _failedDates.clear(); // 清空失败记录
+      }
       _errorMessage = null;
-      _apodList = [];
-      _currentDate = DateTime.now();
     });
 
     try {
       await _loadMoreApod();
+
+      if (mounted) {
+        setState(() {
+          _initialLoadComplete = true;
+          _isLoading = false; // 确保加载完成后状态正确
+
+          // 更新全局缓存
+          _globalApodList = List.from(_apodList);
+          _globalCurrentDate = _currentDate;
+          _globalInitialized = true;
+        });
+
+        // 保存到本地存储
+        await _storageService.saveApods(_apodList);
+        await _storageService.saveCurrentDate(_currentDate);
+        await _storageService.setInitialized(true);
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -81,6 +251,81 @@ class _NasaScreenState extends State<NasaScreen> {
     return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
   }
 
+  // 带有超时和重试功能的图片获取方法
+  Future<NasaApod?> _fetchApodWithRetry(DateTime date) async {
+    final String formattedDate = _getFormattedDate(date);
+
+    // 首先检查本地存储
+    final cachedApod = await _storageService.getApodByDate(formattedDate);
+    if (cachedApod != null) {
+      // 添加到内存缓存
+      _globalCachedApods[formattedDate] = cachedApod;
+      return cachedApod;
+    }
+
+    // 检查重试次数是否已达上限
+    final int retryCount = _failedDates[formattedDate] ?? 0;
+    if (retryCount >= _maxRetries) {
+      print('已达重试上限，跳过日期: $formattedDate');
+      return null;
+    }
+
+    try {
+      // 添加API速率限制控制
+      final now = DateTime.now();
+      final timeSinceLastRequest = now.difference(_lastRequestTime);
+      if (timeSinceLastRequest < const Duration(milliseconds: 1000)) {
+        // 确保请求间隔至少1秒
+        final waitTime =
+            const Duration(milliseconds: 1000) - timeSinceLastRequest;
+        await Future.delayed(waitTime);
+      }
+
+      _lastRequestTime = DateTime.now();
+
+      // 使用8秒超时获取数据
+      final apod = await _nasaService
+          .getAstronomyPictureByDate(date)
+          .timeout(const Duration(seconds: 8));
+
+      // 获取成功则从失败记录中移除
+      if (_failedDates.containsKey(formattedDate)) {
+        _failedDates.remove(formattedDate);
+      }
+
+      // 保存到全局缓存
+      _globalCachedApods[formattedDate] = apod;
+
+      // 保存到本地存储
+      await _storageService.saveApod(apod);
+
+      return apod;
+    } catch (e) {
+      // 更新失败计数
+      _failedDates[formattedDate] = retryCount + 1;
+
+      // 检查是否为429错误（请求过多）
+      final bool isRateLimitError = e.toString().contains('429');
+
+      // 计算指数退避等待时间
+      Duration backoffTime = _initialBackoff;
+      if (isRateLimitError) {
+        // 对于429错误使用指数退避
+        final int backoffSeconds =
+            _initialBackoff.inSeconds * (1 << retryCount);
+        backoffTime = Duration(
+            seconds: backoffSeconds > _maxBackoffSeconds
+                ? _maxBackoffSeconds
+                : backoffSeconds);
+        print('API限流(429)，等待 ${backoffTime.inSeconds} 秒后重试');
+        await Future.delayed(backoffTime);
+      }
+
+      print('获取日期 $formattedDate 的图片失败, 已重试 ${retryCount + 1} 次: $e');
+      return null;
+    }
+  }
+
   // 并行加载更多NASA每日一图
   Future<void> _loadMoreApod() async {
     if (_isLoadingMore || !_hasMore || !mounted) return;
@@ -94,8 +339,8 @@ class _NasaScreenState extends State<NasaScreen> {
       final List<DateTime> dates = [];
       DateTime date = _currentDate;
 
-      // 准备10个并行请求
-      for (int i = 0; i < 10; i++) {
+      // 减少并行请求数，从10个减少到6个，避免触发API限流
+      for (int i = 0; i < 6; i++) {
         final String formattedDate = _getFormattedDate(date);
 
         // 检查缓存中是否已有此日期的数据
@@ -104,7 +349,7 @@ class _NasaScreenState extends State<NasaScreen> {
           futures.add(Future.value(_cachedApods[formattedDate]));
         } else {
           dates.add(date);
-          futures.add(_fetchApodWithTimeout(date));
+          futures.add(_fetchApodWithRetry(date));
         }
 
         date = date.subtract(const Duration(days: 1));
@@ -115,8 +360,21 @@ class _NasaScreenState extends State<NasaScreen> {
         }
       }
 
-      // 并行执行所有请求
-      final results = await Future.wait(futures);
+      // 顺序执行请求而不是并行，以避免触发API限流
+      final List<NasaApod?> results = [];
+      for (int i = 0; i < futures.length; i++) {
+        try {
+          final result = await futures[i];
+          results.add(result);
+        } catch (e) {
+          results.add(null);
+        }
+
+        // 每个请求之间等待一秒
+        if (i < futures.length - 1) {
+          await Future.delayed(const Duration(seconds: 1));
+        }
+      }
 
       if (!_isMounted) return;
 
@@ -125,11 +383,17 @@ class _NasaScreenState extends State<NasaScreen> {
 
       for (int i = 0; i < results.length; i++) {
         if (results[i] != null) {
-          newApodList.add(results[i]!);
-          final String formattedDate = _getFormattedDate(dates[i]);
-          _cachedApods[formattedDate] = results[i]!;
+          // 过滤掉视频类型
+          if (results[i]!.mediaType != 'video') {
+            newApodList.add(results[i]!);
+            final String formattedDate = _getFormattedDate(dates[i]);
+            _cachedApods[formattedDate] = results[i]!;
+          }
         }
       }
+
+      // 对新获取的图片按日期排序（降序，最新日期优先）
+      newApodList.sort((a, b) => b.date.compareTo(a.date));
 
       // 更新日期指针
       if (dates.isNotEmpty) {
@@ -138,11 +402,16 @@ class _NasaScreenState extends State<NasaScreen> {
 
       if (mounted) {
         setState(() {
+          // 确保列表按日期排序
           _apodList.addAll(newApodList);
+          _apodList.sort((a, b) => b.date.compareTo(a.date));
           _isLoading = false;
           _isLoadingMore = false;
         });
       }
+
+      // 重试获取那些失败但未达到重试上限的日期
+      _retryFailedDates();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -154,14 +423,58 @@ class _NasaScreenState extends State<NasaScreen> {
     }
   }
 
-  // 使用超时机制获取APOD数据
-  Future<NasaApod?> _fetchApodWithTimeout(DateTime date) async {
-    try {
-      return await _nasaService
-          .getAstronomyPictureByDate(date)
-          .timeout(const Duration(seconds: 5));
-    } catch (e) {
-      return null;
+  // 重试获取失败的日期
+  Future<void> _retryFailedDates() async {
+    if (!mounted || _failedDates.isEmpty) return;
+
+    // 获取所有需要重试且未达到重试上限的日期
+    final List<String> datesToRetry = _failedDates.entries
+        .where((entry) => entry.value < _maxRetries)
+        .map((entry) => entry.key)
+        .toList();
+
+    if (datesToRetry.isEmpty) return;
+
+    print('重试加载 ${datesToRetry.length} 个日期的图片');
+
+    // 延迟2秒后开始重试，避免连续请求
+    await Future.delayed(const Duration(seconds: 2));
+
+    for (final dateStr in datesToRetry) {
+      if (!mounted) return;
+
+      try {
+        final date = DateTime.parse(dateStr);
+        final apod = await _fetchApodWithRetry(date);
+
+        if (apod != null && apod.mediaType != 'video') {
+          if (mounted) {
+            setState(() {
+              // 添加到缓存和列表
+              _globalCachedApods[dateStr] = apod;
+
+              // 检查是否已存在相同日期的项
+              final existingIndex =
+                  _apodList.indexWhere((item) => item.date == dateStr);
+              if (existingIndex >= 0) {
+                _apodList[existingIndex] = apod;
+              } else {
+                _apodList.add(apod);
+                // 重新排序
+                _apodList.sort((a, b) => b.date.compareTo(a.date));
+              }
+
+              // 更新全局列表
+              _globalApodList = List.from(_apodList);
+            });
+          }
+        }
+      } catch (e) {
+        print('重试加载日期 $dateStr 失败: $e');
+      }
+
+      // 每次重试之间延迟时间更长，避免API限流
+      await Future.delayed(const Duration(seconds: 2));
     }
   }
 
@@ -171,37 +484,107 @@ class _NasaScreenState extends State<NasaScreen> {
 
     setState(() {
       _hasMore = true;
+      _failedDates.clear();
+      _apodList = [];
+      _currentDate = DateTime.now();
+      _initialLoadComplete = false; // 重置初始加载标志
+      _isLoading = true;
+
+      // 重置全局缓存
+      _globalApodList = [];
+      _globalCurrentDate = DateTime.now();
+      _globalScrollPosition = 0.0; // 重置滚动位置
+
+      // 确保滚动到顶部
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
     });
+
+    // 保存重置后的状态
+    await _storageService.saveScrollPosition(0.0);
+    await _storageService.saveCurrentDate(_currentDate);
+
+    await _loadApodList();
+  }
+
+  // 清除所有缓存
+  Future<void> _clearCache() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    await _storageService.clearAllCache();
+
+    setState(() {
+      _hasMore = true;
+      _failedDates.clear();
+      _apodList = [];
+      _currentDate = DateTime.now();
+      _initialLoadComplete = false;
+      _globalApodList = [];
+      _globalCachedApods.clear();
+      _globalCurrentDate = DateTime.now();
+      _globalScrollPosition = 0.0;
+      _globalInitialized = false;
+
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+    });
+
     await _loadApodList();
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
+
     return Scaffold(
       backgroundColor: AppTheme.darkBlue,
-      appBar: AppBar(
-        backgroundColor: AppTheme.darkBlue,
-        title: const Text(
-          'NASA每日一图',
-          style: TextStyle(color: AppTheme.white),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: GestureDetector(
+          onDoubleTap: _scrollToTop, // 双击AppBar返回顶部
+          child: AppBar(
+            backgroundColor: AppTheme.darkBlue,
+            title: const Text(
+              'NASA每日一图',
+              style: TextStyle(color: AppTheme.white),
+            ),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.calendar_today, color: AppTheme.white),
+                onPressed: _showDatePicker,
+              ),
+              IconButton(
+                icon: const Icon(Icons.refresh, color: AppTheme.white),
+                onPressed: _refreshData,
+              ),
+              // 添加清除缓存按钮
+              IconButton(
+                icon: const Icon(Icons.delete_outline, color: AppTheme.white),
+                onPressed: _clearCache,
+                tooltip: '清除缓存',
+              ),
+            ],
+          ),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.calendar_today, color: AppTheme.white),
-            onPressed: _showDatePicker,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh, color: AppTheme.white),
-            onPressed: _refreshData,
-          ),
-        ],
       ),
       body: _buildBody(),
     );
   }
 
   Widget _buildBody() {
-    if (_isLoading && _apodList.isEmpty) {
+    // 如果有数据，无论是否加载中都显示列表
+    if (_apodList.isNotEmpty) {
+      return _buildApodListView();
+    }
+
+    // 无数据且加载中
+    if (_isLoading) {
       return const Center(
           child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -216,7 +599,8 @@ class _NasaScreenState extends State<NasaScreen> {
       ));
     }
 
-    if (_errorMessage != null && _apodList.isEmpty) {
+    // 有错误且无数据
+    if (_errorMessage != null) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -246,11 +630,13 @@ class _NasaScreenState extends State<NasaScreen> {
       );
     }
 
-    if (_apodList.isEmpty) {
-      return const Center(
-          child: Text('无数据', style: TextStyle(color: AppTheme.white)));
-    }
+    // 无数据无错误无加载中（可能是初始状态或加载失败）
+    return const Center(
+        child: Text('无数据', style: TextStyle(color: AppTheme.white)));
+  }
 
+  // 提取图片列表视图为单独方法
+  Widget _buildApodListView() {
     return RefreshIndicator(
       onRefresh: _refreshData,
       color: AppTheme.purple,
@@ -258,6 +644,7 @@ class _NasaScreenState extends State<NasaScreen> {
       child: CustomScrollView(
         controller: _scrollController,
         slivers: [
+          // 移除顶部双击提示文本
           SliverPadding(
             padding: const EdgeInsets.all(12),
             sliver: SliverGrid(
@@ -276,7 +663,7 @@ class _NasaScreenState extends State<NasaScreen> {
               ),
             ),
           ),
-          if (_hasMore)
+          if (_hasMore || _isLoadingMore)
             SliverToBoxAdapter(
               child: _buildLoadMoreIndicator(),
             ),
@@ -290,20 +677,8 @@ class _NasaScreenState extends State<NasaScreen> {
       padding: const EdgeInsets.symmetric(vertical: 20),
       child: Center(
         child: _isLoadingMore
-            ? const Column(
-                children: [
-                  CircularProgressIndicator(color: AppTheme.purple),
-                  SizedBox(height: 8),
-                  Text(
-                    '加载中...',
-                    style: TextStyle(color: AppTheme.lightBlue),
-                  ),
-                ],
-              )
-            : const Text(
-                '上拉加载更多',
-                style: TextStyle(color: AppTheme.lightBlue),
-              ),
+            ? const CircularProgressIndicator(color: AppTheme.purple)
+            : Container(),
       ),
     );
   }
@@ -311,6 +686,7 @@ class _NasaScreenState extends State<NasaScreen> {
   Widget _buildApodCard(NasaApod apod) {
     return GestureDetector(
       onTap: () => _showApodDetails(apod, context),
+      // 移除卡片的双击返回顶部功能
       child: Card(
         elevation: 4,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -325,35 +701,28 @@ class _NasaScreenState extends State<NasaScreen> {
                   fit: StackFit.expand,
                   children: [
                     // 图片加载
-                    apod.mediaType == 'image'
-                        ? Image.network(
-                            apod.url,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) {
-                              return const Center(
-                                child: Icon(Icons.image_not_supported,
-                                    size: 40, color: Colors.grey),
-                              );
-                            },
-                            loadingBuilder: (context, child, loadingProgress) {
-                              if (loadingProgress == null) return child;
-                              return Center(
-                                child: CircularProgressIndicator(
-                                  color: AppTheme.purple,
-                                  value: loadingProgress.expectedTotalBytes !=
-                                          null
-                                      ? loadingProgress.cumulativeBytesLoaded /
-                                          (loadingProgress.expectedTotalBytes ??
-                                              1)
-                                      : null,
-                                ),
-                              );
-                            },
-                          )
-                        : const Center(
-                            child:
-                                Icon(Icons.movie, size: 40, color: Colors.grey),
+                    Image.network(
+                      apod.url,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return const Center(
+                          child: Icon(Icons.image_not_supported,
+                              size: 40, color: Colors.grey),
+                        );
+                      },
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return Center(
+                          child: CircularProgressIndicator(
+                            color: AppTheme.purple,
+                            value: loadingProgress.expectedTotalBytes != null
+                                ? loadingProgress.cumulativeBytesLoaded /
+                                    (loadingProgress.expectedTotalBytes ?? 1)
+                                : null,
                           ),
+                        );
+                      },
+                    ),
                     // 标题叠加层
                     Positioned(
                       bottom: 0,
@@ -372,7 +741,7 @@ class _NasaScreenState extends State<NasaScreen> {
                         ),
                         padding: const EdgeInsets.all(8),
                         child: Text(
-                          apod.title,
+                          apod.displayTitle,
                           style: const TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.bold,
@@ -444,7 +813,8 @@ class _NasaScreenState extends State<NasaScreen> {
               surface: AppTheme.midBlue,
               onSurface: AppTheme.white,
             ),
-            dialogBackgroundColor: AppTheme.darkBlue,
+            dialogTheme:
+                const DialogThemeData(backgroundColor: AppTheme.darkBlue),
           ),
           child: child!,
         );
@@ -476,15 +846,18 @@ class _NasaScreenState extends State<NasaScreen> {
         // 从API获取
         apod = await _nasaService.getAstronomyPictureByDate(date);
         // 添加到缓存
-        if (apod != null) {
-          _cachedApods[formattedDate] = apod;
-        }
+        _cachedApods[formattedDate] = apod;
       }
 
       if (mounted) {
         if (apod != null) {
-          // 导航到详情页面
-          _showApodDetails(apod, context);
+          if (apod.mediaType == 'video') {
+            // 如果是视频类型，显示提示
+            _showTemporaryMessage('暂无');
+          } else {
+            // 只有图片类型才导航到详情页面
+            _showApodDetails(apod, context);
+          }
         }
         setState(() {
           _isLoading = false;
@@ -505,6 +878,96 @@ class _NasaScreenState extends State<NasaScreen> {
           ),
         );
       }
+    }
+  }
+
+  // 显示临时消息
+  void _showTemporaryMessage(String message) {
+    // 使用Overlay显示临时消息
+    OverlayEntry overlayEntry;
+
+    overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        bottom: 100, // 放在底部
+        width: MediaQuery.of(context).size.width,
+        child: AnimatedOpacity(
+          opacity: 1.0,
+          duration: const Duration(milliseconds: 500),
+          child: Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.grey, // 不透明灰色
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  message,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Overlay.of(context).insert(overlayEntry);
+
+    // 3秒后开始淡出，并在淡出后移除
+    Future.delayed(const Duration(seconds: 2)).then((_) {
+      if (!mounted) return;
+
+      // 创建一个新的临时视图，用于淡出效果
+      OverlayEntry fadeOverlayEntry = OverlayEntry(
+        builder: (context) => Positioned(
+          bottom: 100, // 放在底部
+          width: MediaQuery.of(context).size.width,
+          child: AnimatedOpacity(
+            opacity: 0.0,
+            duration: const Duration(milliseconds: 500),
+            child: Center(
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey, // 不透明灰色
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    message,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 移除原来的覆盖层，添加新的带淡出效果的覆盖层
+      overlayEntry.remove();
+      Overlay.of(context).insert(fadeOverlayEntry);
+
+      // 淡出后移除覆盖层
+      Future.delayed(const Duration(milliseconds: 500)).then((_) {
+        fadeOverlayEntry.remove();
+      });
+    });
+  }
+
+  // 滚动到顶部的方法
+  void _scrollToTop() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 500),
+        curve: Curves.easeInOut,
+      );
     }
   }
 }
@@ -531,13 +994,29 @@ class ApodDetailScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 图片部分 - 最简单的显示方式
+            // 图片部分 - 添加点击事件加载高清图片
             Container(
               color: Colors.black,
               height: MediaQuery.of(context).size.height * 0.4,
               width: double.infinity,
-              child: apod.mediaType == 'image'
-                  ? Center(
+              child: GestureDetector(
+                onTap: () {
+                  if (apod.hdurl != null) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => FullScreenImageView(
+                          imageUrl: apod.hdurl!,
+                          title: apod.displayTitle,
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Center(
                       child: Image.network(
                         apod.url,
                         fit: BoxFit.contain, // 保持原比例完整显示
@@ -555,10 +1034,10 @@ class ApodDetailScreen extends StatelessWidget {
                           );
                         },
                       ),
-                    )
-                  : const Center(
-                      child: Icon(Icons.movie, color: AppTheme.white, size: 50),
                     ),
+                  ],
+                ),
+              ),
             ),
 
             // 详情部分
@@ -568,7 +1047,7 @@ class ApodDetailScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    apod.title,
+                    apod.displayTitle,
                     style: const TextStyle(
                       color: AppTheme.white,
                       fontSize: 24,
@@ -594,70 +1073,127 @@ class ApodDetailScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 16),
                   ],
-                  const Text(
-                    '描述',
-                    style: TextStyle(
-                      color: AppTheme.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
                   const SizedBox(height: 8),
                   Text(
-                    apod.explanation,
+                    apod.displayExplanation,
                     style: const TextStyle(color: AppTheme.white),
                   ),
                   const SizedBox(height: 24),
-                  if (apod.mediaType == 'video') ...[
-                    const Text(
-                      '视频内容',
-                      style: TextStyle(
-                        color: AppTheme.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      alignment: Alignment.center,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      child: ElevatedButton.icon(
-                        icon: const Icon(Icons.play_circle_outline),
-                        label: const Text('观看视频'),
-                        onPressed: () {
-                          // 这里可以实现打开视频链接的功能
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.purple,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24, vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                  if (apod.hdurl != null) ...[
-                    Container(
-                      alignment: Alignment.center,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      child: ElevatedButton.icon(
-                        icon: const Icon(Icons.hd),
-                        label: const Text('查看高清图片'),
-                        onPressed: () {
-                          // 这里可以实现显示高清图片的功能
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.purple,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24, vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// 全屏图片查看页面
+class FullScreenImageView extends StatefulWidget {
+  final String imageUrl;
+  final String title;
+
+  const FullScreenImageView({
+    super.key,
+    required this.imageUrl,
+    required this.title,
+  });
+
+  @override
+  State<FullScreenImageView> createState() => _FullScreenImageViewState();
+}
+
+class _FullScreenImageViewState extends State<FullScreenImageView> {
+  bool _isLoading = true;
+  bool _hasError = false;
+  String? _errorMessage;
+  final TransformationController _transformationController =
+      TransformationController();
+
+  @override
+  void dispose() {
+    _transformationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        elevation: 0,
+        title: Text(
+          widget.title,
+          style: const TextStyle(color: Colors.white, fontSize: 16),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 可缩放的高清图片
+          InteractiveViewer(
+            transformationController: _transformationController,
+            minScale: 0.5,
+            maxScale: 4.0,
+            child: Center(
+              child: Image.network(
+                widget.imageUrl,
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) {
+                    _isLoading = false;
+                    return child;
+                  }
+                  // 删除加载指示器，直接返回空容器
+                  return Container();
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  _hasError = true;
+                  _errorMessage = error.toString();
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.error_outline,
+                              color: Colors.white, size: 64),
+                          const SizedBox(height: 16),
+                          const Text(
+                            '加载高清图片失败',
+                            style: TextStyle(color: Colors.white, fontSize: 18),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _errorMessage ?? '未知错误',
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 14),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 24),
+                          ElevatedButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppTheme.purple,
+                            ),
+                            child: const Text('返回'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
