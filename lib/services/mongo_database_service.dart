@@ -2,6 +2,7 @@ import 'package:mongo_dart/mongo_dart.dart'
     hide
         State; // Added hide State to avoid conflict if any with Flutter's State
 import '../models/quiz_question.dart';
+import 'dart:io';
 
 class MongoDatabaseService {
   Db? _db;
@@ -11,10 +12,15 @@ class MongoDatabaseService {
   // 例如: 'mongodb+srv://<username>:<password>@<cluster-url>/<databaseName>?retryWrites=true&w=majority'
   // 强烈建议不要硬编码，而是从安全的地方读取，例如配置文件或环境变量。
   static const String _connectionString =
-      'mongodb+srv://root:root@guichen.sxtgsoe.mongodb.net/heavenly_questions_db?retryWrites=true&w=majority&appName=guichen'; // <<< MODIFIED: Explicitly added database name
+      'mongodb+srv://root:root@guichen.sxtgsoe.mongodb.net/heavenly_questions_db'
+      '?retryWrites=true&w=majority&appName=guichen'
+      '&connectTimeoutMS=5000&socketTimeoutMS=5000&serverSelectionTimeoutMS=5000';
   static const String _dbName = 'heavenly_questions_db'; // 您在 Atlas 中创建的数据库名
   static const String _questionsCollectionName = 'questions';
   static const String _categoriesCollectionName = 'categories';
+
+  // 连接超时设置（毫秒）
+  static const int _connectionTimeout = 5000; // 5秒
 
   Future<void> init() async {
     if (_db != null && _db!.isConnected) {
@@ -22,7 +28,13 @@ class MongoDatabaseService {
       return;
     }
     try {
+      // 直接尝试连接，不再有多种连接方式的尝试
+      print("尝试连接MongoDB...");
+
+      // 创建带超时的连接
       _db = await Db.create(_connectionString);
+
+      // 调整为使用正确的连接选项参数
       await _db!.open();
       print("MongoDB connected successfully!");
 
@@ -37,6 +49,8 @@ class MongoDatabaseService {
       print("MongoDB Collections and Indexes initialized/verified.");
     } catch (e) {
       print('Error connecting to MongoDB: $e');
+
+      // 不再尝试备用连接方式，直接抛出异常，让服务层处理
       _db = null;
       rethrow;
     }
@@ -56,8 +70,9 @@ class MongoDatabaseService {
   // --- Category Methods ---
 
   Future<String?> addCategory(QuizCategory category) async {
-    if (!isConnected || _categoriesCollection == null)
+    if (!isConnected || _categoriesCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final now = DateTime.now();
       final categoryMap =
@@ -79,8 +94,9 @@ class MongoDatabaseService {
   }
 
   Future<List<QuizCategory>> getAllCategories() async {
-    if (!isConnected || _categoriesCollection == null)
+    if (!isConnected || _categoriesCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final categoriesMap = await _categoriesCollection!.find().toList();
       return categoriesMap.map((map) => QuizCategory.fromMap(map)).toList();
@@ -91,8 +107,9 @@ class MongoDatabaseService {
   }
 
   Future<QuizCategory?> getCategoryByName(String name) async {
-    if (!isConnected || _categoriesCollection == null)
+    if (!isConnected || _categoriesCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final categoryMap =
           await _categoriesCollection!.findOne(where.eq('name', name));
@@ -107,9 +124,10 @@ class MongoDatabaseService {
   }
 
   Future<bool> updateCategory(QuizCategory category) async {
-    if (!isConnected || category.id == null || _categoriesCollection == null)
+    if (!isConnected || category.id == null || _categoriesCollection == null) {
       throw Exception(
           'MongoDB not connected, category ID is null, or collection not initialized');
+    }
     try {
       final now = DateTime.now();
       final Map<String, dynamic> updateDoc = {
@@ -135,8 +153,9 @@ class MongoDatabaseService {
   }
 
   Future<bool> deleteCategory(String categoryId) async {
-    if (!isConnected || _categoriesCollection == null)
+    if (!isConnected || _categoriesCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final result = await _categoriesCollection!
           .deleteOne(where.id(ObjectId.fromHexString(categoryId)));
@@ -155,8 +174,9 @@ class MongoDatabaseService {
   // --- Question Methods ---
 
   Future<String?> addQuestion(QuizQuestion question) async {
-    if (!isConnected || _questionsCollection == null)
+    if (!isConnected || _questionsCollection == null) {
       throw Exception('MongoDB未连接或集合未初始化');
+    }
     try {
       final now = DateTime.now();
       final questionMap =
@@ -180,8 +200,9 @@ class MongoDatabaseService {
   }
 
   Future<List<QuizQuestion>> getAllQuestions() async {
-    if (!isConnected || _questionsCollection == null)
+    if (!isConnected || _questionsCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final questionsMap = await _questionsCollection!.find().toList();
       return questionsMap.map((map) => QuizQuestion.fromMap(map)).toList();
@@ -192,8 +213,9 @@ class MongoDatabaseService {
   }
 
   Future<List<QuizQuestion>> getQuestionsByCategory(String categoryName) async {
-    if (!isConnected || _questionsCollection == null)
+    if (!isConnected || _questionsCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final questionsMap = await _questionsCollection!
           .find(where.eq('categoryName', categoryName))
@@ -206,8 +228,9 @@ class MongoDatabaseService {
   }
 
   Future<QuizQuestion?> getQuestionById(String questionId) async {
-    if (!isConnected || _questionsCollection == null)
+    if (!isConnected || _questionsCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final questionMap = await _questionsCollection!
           .findOne(where.id(ObjectId.fromHexString(questionId)));
@@ -222,9 +245,10 @@ class MongoDatabaseService {
   }
 
   Future<bool> updateQuestion(QuizQuestion question) async {
-    if (!isConnected || question.id == null || _questionsCollection == null)
+    if (!isConnected || question.id == null || _questionsCollection == null) {
       throw Exception(
           'MongoDB not connected, question ID is null, or collection not initialized');
+    }
     try {
       final now = DateTime.now();
       final Map<String, dynamic> updateDoc = {
@@ -250,8 +274,9 @@ class MongoDatabaseService {
   }
 
   Future<bool> deleteQuestion(String questionId) async {
-    if (!isConnected || _questionsCollection == null)
+    if (!isConnected || _questionsCollection == null) {
       throw Exception('MongoDB not connected or collection not initialized');
+    }
     try {
       final result = await _questionsCollection!
           .deleteOne(where.id(ObjectId.fromHexString(questionId)));
@@ -290,7 +315,7 @@ class MongoDatabaseService {
           "Please add categories through the application interface or other external tools.");
     } else {
       print(
-          "Categories collection already contains ${categoryCount} categor(y/ies). No default categories will be added.");
+          "Categories collection already contains $categoryCount categor(y/ies). No default categories will be added.");
     }
 
     // Check questions
@@ -302,7 +327,7 @@ class MongoDatabaseService {
           "Please add questions through the application interface or other external tools.");
     } else {
       print(
-          "Questions collection already contains ${questionCount} question(s). No default questions will be added.");
+          "Questions collection already contains $questionCount question(s). No default questions will be added.");
     }
     print(
         "Data seeding process completed. Database content relies on external/manual input.");

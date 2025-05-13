@@ -261,7 +261,7 @@ class _QuestionScreenState extends State<QuestionScreen> {
             ),
 
             // 答案解析
-            if (_showAnswer && question.explanation != null)
+            if (_showAnswer)
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -292,7 +292,7 @@ class _QuestionScreenState extends State<QuestionScreen> {
                       '解析:',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                    Text(question.explanation!),
+                    Text(question.explanation),
                   ],
                 ),
               ),

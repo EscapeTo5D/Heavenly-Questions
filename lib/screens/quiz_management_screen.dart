@@ -155,7 +155,7 @@ class _QuizManagementScreenState extends State<QuizManagementScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('加载题库失败: 请重启应用或联系开发者'),
+            content: const Text('加载题库失败: 请重启应用或联系开发者'),
             backgroundColor: Colors.red,
             duration: const Duration(seconds: 5),
             action: SnackBarAction(
@@ -265,7 +265,7 @@ class _QuizManagementScreenState extends State<QuizManagementScreen> {
   Future<void> _addCategory() async {
     final result = await showDialog<QuizCategory>(
       context: context,
-      builder: (context) => CategoryEditDialog(),
+      builder: (context) => const CategoryEditDialog(),
     );
 
     if (result != null) {
@@ -533,11 +533,10 @@ class _QuizManagementScreenState extends State<QuizManagementScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // 分类标签
-                if (question.categoryName != null &&
-                    question.categoryName!.isNotEmpty)
+                if (question.categoryName.isNotEmpty)
                   Chip(
                     label: Text(
-                      question.categoryName!,
+                      question.categoryName,
                       style: const TextStyle(
                         color: AppTheme.white,
                         fontSize: 12,
@@ -603,8 +602,7 @@ class _QuizManagementScreenState extends State<QuizManagementScreen> {
                       ),
                     ),
                 // 解释文本 (如果有)
-                if (question.explanation != null &&
-                    question.explanation!.isNotEmpty) ...[
+                if (question.explanation.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   const Divider(color: AppTheme.darkBlue),
                   const SizedBox(height: 8),

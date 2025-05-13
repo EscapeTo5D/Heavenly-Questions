@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../constants/theme.dart';
 import '../models/quiz_question.dart';
 import '../services/quiz_service.dart';
+import 'package:intl/intl.dart';
 
 class AstronomyQuizScreen extends StatefulWidget {
   const AstronomyQuizScreen({super.key});
@@ -16,57 +17,96 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
   bool _quizCompleted = false;
   bool _isLoading = true;
   String? _selectedCategory;
+  int? _selectedOptionIndex;
+  String? _loadError;
+  DateTime? _cacheTimestamp;
 
   List<QuizQuestion> _allQuestions = [];
   List<QuizCategory> _categories = [];
   List<QuizQuestion> _currentQuestions = [];
 
+  final QuizService _quizService = QuizService();
+
   @override
   void initState() {
     super.initState();
-    _loadQuizData();
-  }
-
-  // 加载题库数据
-  Future<void> _loadQuizData() async {
-    setState(() => _isLoading = true);
-
-    try {
-      final quizService = QuizService();
-      final categories = await quizService.getAllCategories();
-      final questions = await quizService.getAllQuestions();
-
-      setState(() {
-        _categories = categories;
-        _allQuestions = questions;
-        _isLoading = false;
-
-        // 默认选择所有问题
-        _selectedCategory = null;
-        _updateCurrentQuestions();
-      });
-    } catch (e) {
-      print('加载题库失败: $e');
-      setState(() => _isLoading = false);
+    _quizService.onStateChange.addListener(_onQuizServiceStateChanged);
+    if (_quizService.isInitialized) {
+      _loadQuizData();
+    } else {
+      if (!_isLoading) setState(() => _isLoading = true);
     }
   }
 
-  // 根据选择的分类更新当前题目列表
+  @override
+  void dispose() {
+    _quizService.onStateChange.removeListener(_onQuizServiceStateChanged);
+    super.dispose();
+  }
+
+  void _onQuizServiceStateChanged() {
+    if (mounted) {
+      print(
+          'AstronomyQuizScreen: Detected QuizService state change. Reloading data.');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _loadQuizData();
+      });
+    }
+  }
+
+  Future<void> _loadQuizData() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = true;
+      _loadError = null;
+    });
+
+    try {
+      if (!_quizService.isInitialized) {
+        print(
+            'AstronomyQuizScreen: QuizService not initialized yet. Waiting...');
+        return;
+      }
+
+      final categories = await _quizService.getAllCategories();
+      final questions = await _quizService.getAllQuestions();
+      final cacheTimestamp = await _quizService.getLocalCacheTimestamp();
+
+      if (!mounted) return;
+      setState(() {
+        _categories = categories;
+        _allQuestions = questions;
+        _cacheTimestamp = cacheTimestamp;
+        _isLoading = false;
+        _updateCurrentQuestions();
+      });
+    } catch (e) {
+      print('AstronomyQuizScreen: Error loading quiz data: $e');
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _loadError = e.toString();
+        if (_allQuestions.isEmpty && _categories.isEmpty) {
+          _showErrorDialog('加载失败', '无法加载题库数据: $e\n\n请稍后重试或检查应用更新。');
+        }
+      });
+    }
+  }
+
   void _updateCurrentQuestions() {
-    if (_selectedCategory == null) {
-      // 如果没有选择分类，显示所有题目
+    if (_allQuestions.isEmpty) {
+      _currentQuestions = [];
+    } else if (_selectedCategory == null) {
       _currentQuestions = List.from(_allQuestions);
     } else {
-      // 否则筛选指定分类的题目
       _currentQuestions = _allQuestions
           .where((q) => q.categoryName == _selectedCategory)
           .toList();
     }
-
-    // 重置问题索引和分数
     _currentQuestionIndex = 0;
     _score = 0;
     _quizCompleted = false;
+    _selectedOptionIndex = null;
   }
 
   void _checkAnswer(int selectedOptionIndex) {
@@ -79,10 +119,20 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
     if (isCorrect) {
       setState(() {
         _score++;
+        _selectedOptionIndex = selectedOptionIndex;
       });
-    }
 
-    _showAnswerDialog(isCorrect);
+      Future.delayed(const Duration(milliseconds: 800), () {
+        if (mounted) {
+          _showAnswerDialog(true);
+          setState(() {
+            _selectedOptionIndex = null;
+          });
+        }
+      });
+    } else {
+      _showAnswerDialog(false);
+    }
   }
 
   void _showAnswerDialog(bool isCorrect) {
@@ -152,7 +202,6 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
     });
   }
 
-  // 选择分类对话框
   Future<void> _showCategorySelector() async {
     await showDialog(
       context: context,
@@ -168,7 +217,6 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
             child: ListView(
               shrinkWrap: true,
               children: [
-                // 添加"全部"选项
                 ListTile(
                   title: const Text(
                     '全部类别',
@@ -210,7 +258,7 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
                       Navigator.pop(context);
                     },
                   );
-                }).toList(),
+                }),
               ],
             ),
           ),
@@ -228,8 +276,48 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
     );
   }
 
+  void _showErrorDialog(String title, String message) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: AppTheme.midBlue,
+          title: Text(
+            title,
+            style: const TextStyle(
+              color: Colors.red,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          content: SingleChildScrollView(
+            child: Text(
+              message,
+              style: const TextStyle(color: AppTheme.white),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text(
+                '确定',
+                style: TextStyle(color: AppTheme.purple),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final bool isOfflineMode =
+        !_quizService.isOnline && _quizService.isInitialized;
+
     return Scaffold(
       backgroundColor: AppTheme.darkBlue,
       appBar: AppBar(
@@ -239,10 +327,30 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
           style: TextStyle(color: AppTheme.white),
         ),
         actions: [
+          if (isOfflineMode)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+              child: Tooltip(
+                message: '当前处于离线模式',
+                child: Icon(
+                  Icons.offline_bolt,
+                  color: Colors.amber,
+                ),
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.category, color: AppTheme.white),
-            onPressed: _isLoading ? null : _showCategorySelector,
+            onPressed: (_isLoading || !_quizService.isInitialized)
+                ? null
+                : _showCategorySelector,
             tooltip: '选择题目分类',
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh, color: AppTheme.white),
+            onPressed: (_isLoading || !_quizService.isInitialized)
+                ? null
+                : _refreshData,
+            tooltip: isOfflineMode ? '尝试重新连接并刷新' : '刷新题库数据 (已在线)',
           ),
         ],
         iconTheme: const IconThemeData(color: AppTheme.white),
@@ -251,13 +359,49 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
       body: SafeArea(
         child: _isLoading
             ? _buildLoadingView()
-            : _currentQuestions.isEmpty
-                ? _buildEmptyView()
-                : _quizCompleted
-                    ? _buildQuizCompletedView()
-                    : _buildQuizView(),
+            : !_quizService.isInitialized && _loadError == null
+                ? _buildLoadingView()
+                : _currentQuestions.isEmpty
+                    ? _buildEmptyView()
+                    : _quizCompleted
+                        ? _buildQuizCompletedView()
+                        : _buildQuizView(),
       ),
     );
+  }
+
+  Future<void> _refreshData() async {
+    if (!_quizService.isInitialized) {
+      print("AstronomyQuizScreen: Cannot refresh, QuizService not ready.");
+      return;
+    }
+    setState(() => _isLoading = true);
+    try {
+      if (_quizService.isOnline) {
+        await _quizService.refreshCache();
+      } else {
+        await _quizService.initialize();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_quizService.isOnline ? '题库数据已尝试刷新' : '已尝试重新连接并获取最新数据'),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      print('AstronomyQuizScreen: Refresh data failed: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('刷新失败: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   Widget _buildLoadingView() {
@@ -296,6 +440,29 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
   }
 
   Widget _buildEmptyView() {
+    final bool isOffline = !_quizService.isOnline && _quizService.isInitialized;
+    String message = '';
+    IconData icon = Icons.error_outline;
+    Color iconColor = AppTheme.purple;
+
+    if (_loadError != null) {
+      message = '加载题库时出错。\n$_loadError';
+      icon = Icons.cloud_off;
+      iconColor = Colors.red;
+    } else if (isOffline) {
+      message = '当前为离线模式。';
+      icon = Icons.offline_bolt;
+      iconColor = Colors.amber;
+      if (_currentQuestions.isEmpty) {
+        message += '\n本地没有题目数据。';
+        if (_cacheTimestamp == null) message += '\n也未能加载默认题目。';
+      }
+    } else if (_currentQuestions.isEmpty && _quizService.isInitialized) {
+      message = _selectedCategory == null
+          ? '题库为空，请在线时尝试刷新或添加题目。'
+          : '$_selectedCategory 分类下没有题目。';
+    }
+
     return Container(
       decoration: const BoxDecoration(
         gradient: RadialGradient(
@@ -308,50 +475,51 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
         children: [
           _buildStars(),
           Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.error_outline,
-                  color: AppTheme.purple,
-                  size: 64,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _selectedCategory == null
-                      ? '题库为空，请添加题目'
-                      : '${_selectedCategory}分类下没有题目',
-                  style: const TextStyle(
-                    color: AppTheme.white,
-                    fontSize: 18,
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, color: iconColor, size: 64),
+                  const SizedBox(height: 16),
+                  Text(
+                    message,
+                    style: const TextStyle(color: AppTheme.white, fontSize: 18),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: _showCategorySelector,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.purple,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 24, vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
+                  if (isOffline && _cacheTimestamp != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '本地数据最后更新于: ${_formatDateTime(_cacheTimestamp!)}',
+                      style: TextStyle(
+                          color: AppTheme.white.withOpacity(0.7), fontSize: 14),
+                      textAlign: TextAlign.center,
                     ),
-                  ),
-                  child: const Text(
-                    '选择其他分类',
-                    style: TextStyle(
-                      color: AppTheme.white,
-                      fontSize: 16,
+                  ],
+                  const SizedBox(height: 24),
+                  if (_loadError != null ||
+                      (isOffline && _currentQuestions.isEmpty))
+                    ElevatedButton(
+                      onPressed: _refreshData,
+                      child: Text(isOffline ? '尝试重新连接' : '重试加载'),
+                    )
+                  else if (_currentQuestions.isEmpty &&
+                      _quizService.isInitialized)
+                    ElevatedButton(
+                      onPressed: _showCategorySelector,
+                      child: const Text('选择其他分类'),
                     ),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _formatDateTime(DateTime dateTime) {
+    return DateFormat('yyyy-MM-dd HH:mm').format(dateTime);
   }
 
   Widget _buildQuizView() {
@@ -428,27 +596,22 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
   }
 
   Widget _buildQuestionCard() {
-    // 获取当前问题
     final currentQuestion = _currentQuestions[_currentQuestionIndex];
 
-    // 问题区域
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 显示图片 (如果存在)
           if (currentQuestion.imageAssetPath != null &&
               currentQuestion.imageAssetPath!.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 16.0),
               child: ClipRRect(
-                // 添加圆角
                 borderRadius: BorderRadius.circular(12.0),
                 child: Image.asset(
                   currentQuestion.imageAssetPath!,
-                  fit: BoxFit.cover, // 图片填充方式
-                  // 可以添加加载指示器或错误占位符
+                  fit: BoxFit.cover,
                   errorBuilder: (context, error, stackTrace) {
                     return Container(
                       height: 150,
@@ -465,8 +628,6 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
                 ),
               ),
             ),
-
-          // 问题序号和文本
           Text(
             '问题 ${_currentQuestionIndex + 1} / ${_currentQuestions.length}',
             textAlign: TextAlign.center,
@@ -498,17 +659,27 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
         physics: const BouncingScrollPhysics(),
         itemCount: options.length,
         itemBuilder: (context, index) {
+          final bool isSelectedCorrectOption = _selectedOptionIndex != null &&
+              index == _selectedOptionIndex &&
+              index ==
+                  _currentQuestions[_currentQuestionIndex].correctOptionIndex;
+
           return GestureDetector(
-            onTap: () => _checkAnswer(index),
+            onTap:
+                _selectedOptionIndex != null ? null : () => _checkAnswer(index),
             child: Container(
               margin: const EdgeInsets.only(bottom: 12),
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: AppTheme.darkBlue.withOpacity(0.7),
+                color: isSelectedCorrectOption
+                    ? Colors.green.withOpacity(0.3)
+                    : AppTheme.darkBlue.withOpacity(0.7),
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: AppTheme.purple.withOpacity(0.3),
-                  width: 1,
+                  color: isSelectedCorrectOption
+                      ? Colors.green
+                      : AppTheme.purple.withOpacity(0.3),
+                  width: isSelectedCorrectOption ? 2 : 1,
                 ),
               ),
               child: Row(
@@ -518,25 +689,34 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
                     height: 32,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: AppTheme.purple.withOpacity(0.2),
+                      color: isSelectedCorrectOption
+                          ? Colors.green.withOpacity(0.5)
+                          : AppTheme.purple.withOpacity(0.2),
                       shape: BoxShape.circle,
                     ),
-                    child: Text(
-                      String.fromCharCode(65 + index), // A, B, C, D...
-                      style: const TextStyle(
-                        color: AppTheme.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                    child: isSelectedCorrectOption
+                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        : Text(
+                            String.fromCharCode(65 + index),
+                            style: const TextStyle(
+                              color: AppTheme.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: Text(
                       options[index],
-                      style: const TextStyle(
-                        color: AppTheme.white,
+                      style: TextStyle(
+                        color: isSelectedCorrectOption
+                            ? Colors.green
+                            : AppTheme.white,
                         fontSize: 16,
+                        fontWeight: isSelectedCorrectOption
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                       ),
                     ),
                   ),
@@ -678,7 +858,6 @@ class _AstronomyQuizScreenState extends State<AstronomyQuizScreen> {
   }
 }
 
-// 为应用绘制星空背景的自定义画笔
 class StarPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {

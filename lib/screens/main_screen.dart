@@ -71,7 +71,7 @@ class StarMapScreen extends StatelessWidget {
                 child: Column(
                   children: [
                     // 黄道星座球
-                    Expanded(
+                    const Expanded(
                       flex: 3,
                       child: ZodiacSphereScreen(),
                     ),
@@ -422,7 +422,8 @@ class ZodiacConstellationScreen extends StatelessWidget {
           onTap: () {
             Navigator.push(
               context,
-              MaterialPageRoute(builder: (context) => ZodiacSphereScreen()),
+              MaterialPageRoute(
+                  builder: (context) => const ZodiacSphereScreen()),
             );
           },
           child: Container(
