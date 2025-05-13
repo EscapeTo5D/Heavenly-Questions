@@ -11,7 +11,6 @@ class ZodiacSphereScreen extends StatelessWidget {
       backgroundColor: AppTheme.darkBlue,
       appBar: AppBar(
         backgroundColor: AppTheme.darkBlue,
-        title: const Text('黄道球面', style: TextStyle(color: AppTheme.white)),
         iconTheme: const IconThemeData(color: AppTheme.white),
         elevation: 0,
       ),

@@ -684,9 +684,13 @@ class _NasaScreenState extends State<NasaScreen>
   }
 
   Widget _buildApodCard(NasaApod apod) {
+    bool isVideo = apod.mediaType == 'video';
+    // 尝试获取缩略图 URL，如果主 URL 是视频链接
+    String imageUrl =
+        (isVideo && apod.thumbnailUrl != null) ? apod.thumbnailUrl! : apod.url;
+
     return GestureDetector(
       onTap: () => _showApodDetails(apod, context),
-      // 移除卡片的双击返回顶部功能
       child: Card(
         elevation: 4,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -700,29 +704,42 @@ class _NasaScreenState extends State<NasaScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // 图片加载
-                    Image.network(
-                      apod.url,
-                      fit: BoxFit.cover,
-                      errorBuilder: (context, error, stackTrace) {
-                        return const Center(
-                          child: Icon(Icons.image_not_supported,
-                              size: 40, color: Colors.grey),
-                        );
-                      },
-                      loadingBuilder: (context, child, loadingProgress) {
-                        if (loadingProgress == null) return child;
-                        return Center(
-                          child: CircularProgressIndicator(
-                            color: AppTheme.purple,
-                            value: loadingProgress.expectedTotalBytes != null
-                                ? loadingProgress.cumulativeBytesLoaded /
-                                    (loadingProgress.expectedTotalBytes ?? 1)
-                                : null,
+                    // 图片或视频占位符加载
+                    isVideo
+                        ? Container(
+                            color: AppTheme.midBlue, // 背景色
+                            child: Center(
+                              child: Icon(
+                                Icons.play_circle_outline,
+                                color: AppTheme.purple.withOpacity(0.7),
+                                size: 50,
+                              ),
+                            ),
+                          )
+                        : Image.network(
+                            imageUrl, // 使用 imageUrl 变量
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stackTrace) {
+                              return const Center(
+                                child: Icon(Icons.image_not_supported,
+                                    size: 40, color: Colors.grey),
+                              );
+                            },
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return Center(
+                                child: CircularProgressIndicator(
+                                  color: AppTheme.purple,
+                                  value: loadingProgress.expectedTotalBytes !=
+                                          null
+                                      ? loadingProgress.cumulativeBytesLoaded /
+                                          (loadingProgress.expectedTotalBytes ??
+                                              1)
+                                      : null,
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
                     // 标题叠加层
                     Positioned(
                       bottom: 0,
@@ -772,6 +789,15 @@ class _NasaScreenState extends State<NasaScreen>
                         ),
                       ),
                     ),
+                    // 如果是视频，添加一个播放图标提示
+                    if (isVideo)
+                      Center(
+                        child: Icon(
+                          Icons.play_circle_fill,
+                          color: Colors.white.withOpacity(0.7),
+                          size: 60,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -980,6 +1006,10 @@ class ApodDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    bool isVideo = apod.mediaType == 'video';
+    String displayImageUrl =
+        (isVideo && apod.thumbnailUrl != null) ? apod.thumbnailUrl! : apod.url;
+
     return Scaffold(
       backgroundColor: AppTheme.darkBlue,
       appBar: AppBar(
@@ -994,50 +1024,95 @@ class ApodDetailScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 图片部分 - 添加点击事件加载高清图片
+            // 图片或视频占位符/缩略图部分
             Container(
               color: Colors.black,
               height: MediaQuery.of(context).size.height * 0.4,
               width: double.infinity,
-              child: GestureDetector(
-                onTap: () {
-                  if (apod.hdurl != null) {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => FullScreenImageView(
-                          imageUrl: apod.hdurl!,
-                          title: apod.displayTitle,
+              child: isVideo
+                  ? Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (apod.thumbnailUrl != null)
+                          Image.network(
+                            apod.thumbnailUrl!,
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const Center(
+                                    child: Icon(Icons.ondemand_video,
+                                        color: AppTheme.white, size: 50)),
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return const Center(
+                                  child: CircularProgressIndicator(
+                                      color: AppTheme.purple));
+                            },
+                          )
+                        else // 如果没有缩略图，显示通用视频图标
+                          const Center(
+                              child: Icon(Icons.ondemand_video,
+                                  color: AppTheme.white, size: 80)),
+                        Center(
+                          child: Icon(
+                            Icons.play_circle_fill_rounded,
+                            color: Colors.white.withOpacity(0.8),
+                            size: 80,
+                          ),
                         ),
-                      ),
-                    );
-                  }
-                },
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Center(
-                      child: Image.network(
-                        apod.url,
-                        fit: BoxFit.contain, // 保持原比例完整显示
-                        errorBuilder: (context, error, stackTrace) {
-                          return const Center(
-                            child: Icon(Icons.image_not_supported,
-                                color: AppTheme.white, size: 50),
+                        Positioned(
+                          bottom: 10,
+                          left: 0,
+                          right: 0,
+                          child: Text(
+                            '这是一个视频资源，点击可尝试在外部打开',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.7),
+                                fontSize: 12),
+                          ),
+                        )
+                      ],
+                    )
+                  : GestureDetector(
+                      onTap: () {
+                        if (apod.hdurl != null) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => FullScreenImageView(
+                                imageUrl: apod.hdurl!,
+                                title: apod.displayTitle,
+                              ),
+                            ),
                           );
-                        },
-                        loadingBuilder: (context, child, loadingProgress) {
-                          if (loadingProgress == null) return child;
-                          return const Center(
-                            child: CircularProgressIndicator(
-                                color: AppTheme.purple),
-                          );
-                        },
+                        }
+                      },
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Center(
+                            child: Image.network(
+                              displayImageUrl, // 使用 displayImageUrl
+                              fit: BoxFit.contain, // 保持原比例完整显示
+                              errorBuilder: (context, error, stackTrace) {
+                                return const Center(
+                                  child: Icon(Icons.image_not_supported,
+                                      color: AppTheme.white, size: 50),
+                                );
+                              },
+                              loadingBuilder:
+                                  (context, child, loadingProgress) {
+                                if (loadingProgress == null) return child;
+                                return const Center(
+                                  child: CircularProgressIndicator(
+                                      color: AppTheme.purple),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
-              ),
             ),
 
             // 详情部分

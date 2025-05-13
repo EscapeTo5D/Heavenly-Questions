@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'constants/theme.dart';
 import 'utils/routes.dart';
+import 'screens/zodiac_sphere_screen.dart';
+import 'services/quiz_service.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // 设置状态栏透明
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -11,6 +13,10 @@ void main() {
     statusBarBrightness: Brightness.dark,
     statusBarIconBrightness: Brightness.light,
   ));
+
+  // 初始化题库服务
+  await QuizService().initialize();
+
   runApp(const MyApp());
 }
 

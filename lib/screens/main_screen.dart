@@ -3,6 +3,8 @@ import '../widgets/bottom_nav_bar.dart';
 import '../constants/theme.dart';
 import 'zodiac_sphere_screen.dart';
 import 'fixed_nasa_screen.dart';
+import 'astronomy_quiz_screen.dart';
+import 'profile_screen.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -14,27 +16,36 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
+  // Keep all screens in the list for IndexedStack
   final List<Widget> _screens = [
-    const StarMapScreen(),
-    const EncyclopediaScreen(),
-    const SizedBox(), // 占位，因为中间的加号按钮不对应具体页面
-    const NasaScreen(),
-    const ProfileScreen(),
+    const StarMapScreen(), // Index 0
+    const EncyclopediaScreen(), // Index 1
+    const StarMapScreen(), // Index 2 (Placeholder - show StarMap)
+    // Or use: const SizedBox.shrink(), if you want nothing for index 2
+    const NasaScreen(), // Index 3
+    const ProfileScreen(), // Index 4
   ];
 
   void _onTabTapped(int index) {
-    // 跳过中间的添加按钮索引
+    // Allow tapping index 2 (add button) but don't change the screen
     if (index != 2) {
       setState(() {
         _currentIndex = index;
       });
+    } else {
+      // Handle add button action here if needed
+      print("Add button tapped!");
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _screens[_currentIndex == 2 ? 0 : _currentIndex],
+      // Use IndexedStack to keep screen states alive
+      body: IndexedStack(
+        index: _currentIndex,
+        children: _screens,
+      ),
       bottomNavigationBar: BottomNavBar(
         currentIndex: _currentIndex,
         onTap: _onTabTapped,
@@ -57,14 +68,25 @@ class StarMapScreen extends StatelessWidget {
             _buildAppBar(),
             Expanded(
               child: _buildStarryBackground(
-                child: ListView(
-                  padding: const EdgeInsets.all(20),
+                child: Column(
                   children: [
-                    _buildFeaturedCard(context),
-                    const SizedBox(height: 20),
-                    _buildSectionTitle('探索功能'),
-                    const SizedBox(height: 10),
-                    _buildFunctionCards(context),
+                    // 黄道星座球
+                    Expanded(
+                      flex: 3,
+                      child: ZodiacSphereScreen(),
+                    ),
+                    // 其他功能列表
+                    Expanded(
+                      flex: 2,
+                      child: ListView(
+                        padding: const EdgeInsets.all(20),
+                        children: [
+                          _buildSectionTitle('探索功能'),
+                          const SizedBox(height: 10),
+                          _buildFunctionCards(context),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -133,83 +155,6 @@ class StarMapScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildFeaturedCard(BuildContext context) {
-    return Container(
-      height: 200,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF1D2951),
-            Color(0xFF191A30),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 5,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '今晚的星空',
-            style: TextStyle(
-              color: AppTheme.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 5),
-          const Text(
-            '天气晴朗，适合观测猎户座',
-            style: TextStyle(
-              color: AppTheme.white,
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(height: 30),
-          SizedBox(
-            height: 30,
-            child: _buildConstellationPreview(),
-          ),
-          const Spacer(),
-          Align(
-            alignment: Alignment.bottomRight,
-            child: ElevatedButton(
-              onPressed: () {
-                // 导航到观测页面
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.purple,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(15),
-                ),
-              ),
-              child: const Text('去观测'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildConstellationPreview() {
-    // 简单模拟猎户座星星连线
-    return CustomPaint(
-      painter: ConstellationPainter(),
-      size: const Size(double.infinity, 30),
-    );
-  }
-
   Widget _buildSectionTitle(String title) {
     return Text(
       title,
@@ -222,31 +167,64 @@ class StarMapScreen extends StatelessWidget {
   }
 
   Widget _buildFunctionCards(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      crossAxisSpacing: 15,
-      mainAxisSpacing: 15,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      children: [
-        _buildFunctionCard('星空地图', Icons.map),
-        _buildFunctionCard('星座百科', Icons.book),
-        _buildFunctionCard('黄道星座', Icons.nights_stay, onTap: () {
+    // Create a list of function cards
+    final List<Widget> cards = [
+      _buildFunctionCard(
+        context,
+        '天文百科',
+        Icons.book,
+        () {
+          // 导航到天文百科页面
+        },
+      ),
+      _buildFunctionCard(
+        context,
+        '观测指南',
+        Icons.explore,
+        () {
+          // 导航到观测指南页面
+        },
+      ),
+      _buildFunctionCard(
+        context,
+        '天象预报',
+        Icons.event,
+        () {
+          // 导航到天象预报页面
+        },
+      ),
+      _buildFunctionCard(
+        context,
+        '天文学习',
+        Icons.school,
+        () {
           Navigator.push(
             context,
             MaterialPageRoute(
-                builder: (context) => const ZodiacConstellationScreen()),
+                builder: (context) => const AstronomyQuizScreen()),
           );
-        }),
-        _buildFunctionCard('互动学习', Icons.grid_4x4),
-        _buildFunctionCard('天文动态', Icons.newspaper),
-      ],
+        },
+      ),
+    ];
+
+    return GridView.count(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      crossAxisCount: 2,
+      mainAxisSpacing: 15,
+      crossAxisSpacing: 15,
+      childAspectRatio: 1.5,
+      children: cards,
     );
   }
 
-  Widget _buildFunctionCard(String title, IconData icon,
-      {VoidCallback? onTap}) {
-    return GestureDetector(
+  Widget _buildFunctionCard(
+    BuildContext context,
+    String title,
+    IconData icon,
+    VoidCallback onTap,
+  ) {
+    return InkWell(
       onTap: onTap,
       child: Container(
         decoration: BoxDecoration(
@@ -267,20 +245,22 @@ class StarMapScreen extends StatelessWidget {
             ),
           ],
         ),
+        padding: const EdgeInsets.all(15),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
               icon,
-              color: AppTheme.white,
-              size: 36,
+              color: AppTheme.purple,
+              size: 30,
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Text(
               title,
               style: const TextStyle(
                 color: AppTheme.white,
                 fontSize: 14,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ],
@@ -442,8 +422,7 @@ class ZodiacConstellationScreen extends StatelessWidget {
           onTap: () {
             Navigator.push(
               context,
-              MaterialPageRoute(
-                  builder: (context) => const ZodiacSphereScreen()),
+              MaterialPageRoute(builder: (context) => ZodiacSphereScreen()),
             );
           },
           child: Container(
@@ -643,21 +622,3 @@ class EncyclopediaScreen extends StatelessWidget {
 //     );
 //   }
 // }
-
-// 个人中心页面（占位）
-class ProfileScreen extends StatelessWidget {
-  const ProfileScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: AppTheme.darkBlue,
-      body: Center(
-        child: Text(
-          '个人中心',
-          style: TextStyle(color: AppTheme.white, fontSize: 24),
-        ),
-      ),
-    );
-  }
-}
